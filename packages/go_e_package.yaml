@@ -1,0 +1,1164 @@
+# =============================================================================
+#  GO-E GEMINI 11 kW  -  PACKAGE DE PILOTAGE (configuration)
+#  Borne 258457 - pilotage MQTT - modes Off / Maintenant / Surplus / Surplus
+#  natif / Automatique / Tarifs (+ coupure SoC)
+#  Compatible integration syssi/homeassistant-goecharger-mqtt
+# =============================================================================
+#  INSTALLATION
+#  1. Dans configuration.yaml (une seule fois) :
+#       homeassistant:
+#         packages: !include_dir_named packages
+#  2. Place ce fichier dans  config/packages/go_e_package.yaml
+#  3. Recharge la configuration YAML (ou redemarre HA)
+#
+#  Verifie le topic de base dans ton broker : "go-eCharger/258457".
+#  (dans de rares cas un slash de tete "/go-eCharger/..." -> a adapter)
+#  Cles go-e : frc 0=Neutre 1=Off 2=On | amp 6..16 A | psm 0=auto 1=mono 2=tri
+#              lmo 3=Default 4=Eco | fup true=surplus PV | ids={"pGrid":W}
+#
+#  >>> MODE "SURPLUS NATIF" : IP borne = 192.168.0.198 (section 3bis).
+#      Fais une reservation DHCP sur ton routeur pour qu'elle ne change pas.
+# =============================================================================
+
+# ----- 1) HELPERS ------------------------------------------------------------
+input_select:
+  go_e_mode:
+    name: Mode borne go-e
+    icon: mdi:ev-station
+    options:
+      - "Off"
+      - "Maintenant"
+      - "Surplus"
+      - "Surplus natif"        # la borne regule elle-meme (cle ids, cf. 3bis)
+      - "Automatique"          # tarif bas jusqu'a la cible SoC, puis surplus
+                               #   natif au-dela (melange statique + natif)
+      - "Tarification dynamique"
+      - "Tarification statique"
+
+  go_e_puissance_max_reseau:
+    name: Puissance max raccordement
+    icon: mdi:transmission-tower
+    options:
+      - "17250"          # 25 A par phase (valeur par defaut)
+      - "27600"          # 40 A par phase
+    # La 1re option est la valeur par defaut au 1er demarrage.
+    # Plafond de soutirage : la borne reduit son courant (voire coupe)
+    # pour ne pas le depasser.
+
+  go_e_calendrier_hc:
+    name: Calendrier (tarif dynamique)
+    icon: mdi:calendar-clock
+    options:
+      - "Aucun"
+    # Rempli automatiquement au demarrage avec tous tes calendriers (calendar.*)
+    # par l'automatisation "Go-e - Listes calendriers et off-peak".
+    # Utilise par le mode "Tarification dynamique".
+
+  go_e_offpeak:
+    name: Capteur off-peak (tarif statique)
+    icon: mdi:clock-check-outline
+    options:
+      - "Aucun"
+    # Rempli automatiquement au demarrage avec les entites liees aux heures
+    # creuses / off-peak (ex. le capteur OffPeak de Groupe E Tariffs v2).
+    # Utilise par le mode "Tarification statique".
+
+  go_e_batterie_soc:
+    name: Batterie maison - capteur SoC
+    icon: mdi:home-battery
+    options:
+      - "Aucun"
+    # Rempli au demarrage avec les capteurs de charge batterie (%).
+    # Ex. le capteur "Charge" de ta batterie Pylontech.
+
+  go_e_ess_min_soc:
+    name: Batterie maison - reglage ESS min SoC
+    icon: mdi:battery-lock
+    options:
+      - "Aucun"
+    # Rempli au demarrage avec les entites number/input_number liees au
+    # ESS min SoC (ex. "ESS min SoC limit" du GX Device Victron).
+
+  go_e_batterie_puissance:
+    name: Batterie maison - capteur puissance
+    icon: mdi:home-battery-outline
+    options:
+      - "Aucun"
+    # Rempli au demarrage avec les capteurs de puissance batterie (W/kW).
+    # Indispensable pour un calcul de surplus correct quand une batterie
+    # domestique est presente.
+
+  go_e_batterie_signe:
+    name: Batterie maison - sens du signe
+    icon: mdi:plus-minus-variant
+    options:
+      - "Charge positive"      # standard Victron : + = charge, - = decharge
+      - "Charge negative"      # inverse : - = charge, + = decharge
+    # Si le surplus affiche parait inverse, change cette option.
+
+  go_e_surplus_priorite:
+    name: Surplus - priorite
+    icon: mdi:priority-high
+    options:
+      - "Voiture"              # la voiture utilise aussi le solaire qui
+                               #   chargerait la batterie
+      - "Batterie"             # la batterie se remplit d'abord ; la voiture
+                               #   ne prend que le vrai excedent
+
+input_number:
+  go_e_courant_manuel:
+    name: Courant manuel
+    icon: mdi:current-ac
+    min: 6
+    max: 16
+    step: 1
+    unit_of_measurement: "A"
+
+  go_e_surplus_demarrage:
+    name: Surplus - seuil de demarrage
+    icon: mdi:solar-power
+    min: 800
+    max: 4000
+    step: 50
+    unit_of_measurement: "W"
+
+  go_e_surplus_arret:
+    name: Surplus - seuil d'arret
+    icon: mdi:solar-power-variant
+    min: 500
+    max: 3500
+    step: 50
+    unit_of_measurement: "W"
+
+  go_e_soc_cible:
+    name: Niveau de charge cible
+    icon: mdi:battery-charging-80
+    min: 50
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    # 100 = pas de coupure SoC. Mets 80 pour preserver la batterie.
+    # (valeur restauree apres redemarrage)
+
+  go_e_ess_repos:
+    name: Batterie maison - ESS min SoC au repos
+    icon: mdi:battery-arrow-down
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    # Valeur a laquelle revient le ESS min SoC une fois la charge terminee.
+    # (valeur restauree apres redemarrage)
+
+  go_e_surplus_triphase:
+    name: Surplus - bascule triphase
+    icon: mdi:sine-wave
+    min: 4200
+    max: 8000
+    step: 100
+    unit_of_measurement: "W"
+    # (valeur restauree apres redemarrage)
+    # Au-dessus de ce surplus -> triphase. En dessous -> monophase.
+    # Minimum technique du triphase ~4140 W (6 A x 3), garde une marge.
+
+# ----- 1bis) MEMOIRE PERSISTANTE DES SELECTIONS ------------------------------
+#  Les input_select perdent leur valeur au redemarrage (liste reconstruite
+#  apres la restauration). On memorise donc le choix dans un input_text, qui
+#  lui persiste, et on le re-applique au demarrage.
+input_text:
+  go_e_sel_calendrier:
+    name: "Memo - calendrier HC"
+    icon: mdi:content-save-cog
+  go_e_sel_offpeak:
+    name: "Memo - off-peak"
+    icon: mdi:content-save-cog
+  go_e_sel_batterie_soc:
+    name: "Memo - batterie SoC"
+    icon: mdi:content-save-cog
+  go_e_sel_ess_min_soc:
+    name: "Memo - ESS min SoC"
+    icon: mdi:content-save-cog
+  go_e_sel_batterie_puissance:
+    name: "Memo - batterie puissance"
+    icon: mdi:content-save-cog
+
+# ----- 2) LECTURE ETAT BORNE (capteurs MQTT bruts) ---------------------------
+mqtt:
+  sensor:
+    - name: "Go-e frc"
+      unique_id: go_e_frc
+      state_topic: "go-eCharger/258457/frc"
+      icon: mdi:power
+
+    - name: "Go-e amp"
+      unique_id: go_e_amp
+      state_topic: "go-eCharger/258457/amp"
+      unit_of_measurement: "A"
+
+    - name: "Go-e psm"
+      unique_id: go_e_psm
+      state_topic: "go-eCharger/258457/psm"
+      icon: mdi:sine-wave
+
+    - name: "Go-e car"
+      unique_id: go_e_car
+      state_topic: "go-eCharger/258457/car"
+      icon: mdi:car-electric
+
+    # Lecture des reglages surveilles par le watchdog "Surplus natif"
+    - name: "Go-e lmo"
+      unique_id: go_e_lmo
+      state_topic: "go-eCharger/258457/lmo"
+      icon: mdi:cog-outline
+
+    - name: "Go-e fup"
+      unique_id: go_e_fup
+      state_topic: "go-eCharger/258457/fup"
+      icon: mdi:solar-power-variant-outline
+
+    - name: "Go-e spl3"
+      unique_id: go_e_spl3
+      state_topic: "go-eCharger/258457/spl3"
+      unit_of_measurement: "W"
+      icon: mdi:sine-wave
+
+    # "alw" : la borne autorise-t-elle la charge en ce moment ? Sert au
+    # reveil du vehicule (voir automatisation "Reveil vehicule endormi").
+    - name: "Go-e alw"
+      unique_id: go_e_alw
+      state_topic: "go-eCharger/258457/alw"
+      icon: mdi:power-plug-outline
+
+    # "modelStatus" : la raison exacte pour laquelle la borne charge ou non.
+    # Cle de voute de l'analyse hebdomadaire (voir capteur lisible plus bas).
+    - name: "Go-e modelStatus"
+      unique_id: go_e_modelstatus
+      state_topic: "go-eCharger/258457/modelStatus"
+      icon: mdi:information-outline
+
+# ----- 3) CAPTEURS LISIBLES + SURPLUS ESTIME ---------------------------------
+template:
+  - sensor:
+      - name: "Go-e statut"
+        unique_id: go_e_statut
+        icon: mdi:ev-station
+        state: >
+          {% set f = states('sensor.go_e_frc') | int(-1) %}
+          {% set c = states('sensor.go_e_car') | int(-1) %}
+          {% if f == 1 %} Off (forcage)
+          {% elif c == 2 %} En charge
+          {% elif c == 4 %} Termine
+          {% elif c == 3 %} Pret a charger
+          {% elif c == 1 %} Pas de cable
+          {% else %} Inconnu
+          {% endif %}
+
+      - name: "Go-e phases"
+        unique_id: go_e_phases
+        icon: mdi:sine-wave
+        state: >
+          {% set p = states('sensor.go_e_psm') | int(1) %}
+          {{ 'Auto (borne)' if p == 0 else ('Triphase' if p == 2 else 'Monophase') }}
+
+      # --- Telemetrie pour l'analyse hebdomadaire -----------------------------
+      # Traduction du modelStatus en clair : l'historique de ce capteur
+      # raconte la vie de la borne (pourquoi elle charge / ne charge pas).
+      - name: "Go-e raison"
+        unique_id: go_e_raison
+        icon: mdi:comment-question-outline
+        state: >
+          {% set codes = {
+            0:  'Pause : pas de donnees de pilotage',
+            2:  'Pause : attente autorisation',
+            3:  'Charge : forcee (frc=2)',
+            4:  'Pause : forcee (frc=1)',
+            6:  'Pause : limite energie atteinte',
+            12: 'Charge : surplus PV',
+            17: 'Pause : donnees pGrid perdues (fallback)',
+            19: 'Charge : keep-alive vehicule',
+            20: 'Charge : pause interdite',
+            22: 'Pause : simulation debranchement',
+            23: 'Pause : commutation de phases',
+            24: 'Pause : duree mini de pause',
+            26: 'Pause : erreur borne'
+          } %}
+          {% set c = states('sensor.go_e_modelstatus') | int(-1) %}
+          {{ codes.get(c, 'Code ' ~ c) }}
+
+      # Repartition instantanee de la puissance de charge : la part couverte
+      # par un import reseau vs la part solaire. Approximation prudente :
+      # tout import reseau simultane est impute d'abord a la voiture.
+      - name: "Go-e puissance charge reseau"
+        unique_id: go_e_puissance_charge_reseau
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        icon: mdi:transmission-tower-import
+        state: >
+          {% set p_car = states('sensor.go_echarger_258457_power_total') | float(0) %}
+          {% set imp = [ states('sensor.p1_meter_power') | float(0), 0 ] | max %}
+          {{ ([ [p_car, imp] | min, 0 ] | max) | round(0) }}
+
+      - name: "Go-e puissance charge solaire"
+        unique_id: go_e_puissance_charge_solaire
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-power
+        state: >
+          {% set p_car = states('sensor.go_echarger_258457_power_total') | float(0) %}
+          {% set imp = [ states('sensor.p1_meter_power') | float(0), 0 ] | max %}
+          {% set reseau = [ [p_car, imp] | min, 0 ] | max %}
+          {{ ([ p_car - reseau, 0 ] | max) | round(0) }}
+
+      - name: "Go-e surplus estime"
+        unique_id: go_e_surplus_estime
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set p_car = states('sensor.go_echarger_258457_power_total') | float(0) %}
+          {% set p_grid = states('sensor.p1_meter_power') | float(0) %}
+          {% set bp = states('input_select.go_e_batterie_puissance') %}
+          {% set inval = ['Aucun','unknown','unavailable',''] %}
+          {% set raw = states(bp) | float(0) if bp not in inval else 0 %}
+          {% set unit = state_attr(bp,'unit_of_measurement') | default('W') if bp not in inval else 'W' %}
+          {% set p_bat_w = raw * (1000 if unit in ['kW','kw'] else 1) %}
+          {% set p_bat = p_bat_w if states('input_select.go_e_batterie_signe') == 'Charge positive' else (-1 * p_bat_w) %}
+          {% set eff = p_bat if states('input_select.go_e_surplus_priorite') == 'Voiture' else [p_bat, 0] | min %}
+          {{ p_car + eff - p_grid }}
+
+# ----- 3bis) MODE "SURPLUS NATIF" : envoi des puissances a la borne ----------
+#  La borne recoit pGrid comme si un go-e Controller etait present, et regule
+#  ELLE-MEME courant + phases (mode Eco + surplus PV actives par l'automatisation
+#  d'activation plus bas).
+#
+#  IMPORTANT : l'ecriture de la cle `ids` ne fonctionne PAS via MQTT
+#  (constate jusqu'au firmware 59.x). Seule l'API HTTP v2 locale l'accepte,
+#  d'ou ce rest_command. Active "API HTTP locale v2" dans l'app go-e.
+#
+#  >>> ADAPTER L'IP DE LA BORNE CI-DESSOUS <<<
+#
+#  La valeur pgrid est calculee par l'automatisation "Surplus natif - envoi
+#  pGrid" (meme logique batterie signe/priorite que le mode Surplus HA) et
+#  passee ici en parametre.
+rest_command:
+  go_e_send_ids:
+    url: 'http://192.168.0.198/api/set?ids={"pGrid":{{ pgrid }}}'
+    timeout: 4
+
+# ----- 4) AUTOMATISATION DE PILOTAGE -----------------------------------------
+automation:
+  - alias: "Go-e - Pilotage charge (Off / Maintenant / Surplus)"
+    id: go_e_pilotage_charge
+    mode: single
+    trigger:
+      - platform: time_pattern
+        seconds: "/15"
+      - platform: state
+        entity_id:
+          - input_select.go_e_mode
+          - input_select.go_e_puissance_max_reseau
+          - input_select.go_e_calendrier_hc
+          - input_select.go_e_offpeak
+          - input_number.go_e_courant_manuel
+          - input_number.go_e_soc_cible
+      # Reaction immediate si le soutirage depasse le plafond
+      - platform: template
+        value_template: >
+          {{ states('sensor.p1_meter_power') | float(0)
+             > states('input_select.go_e_puissance_max_reseau') | float(17250) }}
+      # Transition heures creuses du calendrier (mode dynamique)
+      - platform: template
+        value_template: >
+          {{ is_state(states('input_select.go_e_calendrier_hc'), 'on') }}
+      # Transition off-peak du capteur choisi (mode statique)
+      - platform: template
+        value_template: >
+          {% set e = states('input_select.go_e_offpeak') %}
+          {{ e not in ['Aucun','unknown','unavailable','']
+             and states(e) | lower in ['on','true','offpeak','active','yes','1'] }}
+    variables:
+      serial: "258457"
+      v_ph: 230
+      mode: "{{ states('input_select.go_e_mode') }}"
+
+      # Fenetre de charge "tarif dynamique" (calendrier choisi)
+      cal_hc: "{{ states('input_select.go_e_calendrier_hc') }}"
+      hc_active: >
+        {{ cal_hc not in ['Aucun', 'unknown', 'unavailable', '']
+           and is_state(cal_hc, 'on') }}
+
+      # Fenetre de charge "tarif statique" (capteur off-peak choisi)
+      ent_op: "{{ states('input_select.go_e_offpeak') }}"
+      op_active: >
+        {{ ent_op not in ['Aucun', 'unknown', 'unavailable', '']
+           and states(ent_op) | lower in ['on','true','offpeak','active','yes','1'] }}
+
+      # P1 : positif = soutirage reseau / negatif = injection
+      p_grid: "{{ states('sensor.p1_meter_power') | float(0) }}"
+      p_car: "{{ states('sensor.go_echarger_258457_power_total') | float(0) }}"
+
+      # Puissance batterie domestique, normalisee "charge positive" (W).
+      # Necessaire pour ne pas confondre decharge batterie et surplus solaire.
+      bp_ent: "{{ states('input_select.go_e_batterie_puissance') }}"
+      bp_valid: "{{ bp_ent not in ['Aucun','unknown','unavailable',''] }}"
+      bp_raw: "{{ states(bp_ent) | float(0) if bp_valid else 0 }}"
+      bp_unit: "{{ state_attr(bp_ent,'unit_of_measurement') | default('W') if bp_valid else 'W' }}"
+      bp_w: "{{ (bp_raw | float(0)) * (1000 if bp_unit in ['kW','kw'] else 1) }}"
+      p_bat: >
+        {{ (bp_w | float(0)) if states('input_select.go_e_batterie_signe') == 'Charge positive'
+           else (-1 * (bp_w | float(0))) }}
+      # Priorite "Voiture" : on compte aussi le solaire qui chargerait la
+      # batterie. Priorite "Batterie" : on ne corrige que la decharge.
+      p_bat_eff: >
+        {{ (p_bat | float(0)) if states('input_select.go_e_surplus_priorite') == 'Voiture'
+           else [ p_bat | float(0), 0 ] | min }}
+
+      # Surplus solaire reel = borne + batterie(charge+) - reseau
+      avail: "{{ (p_car | float(0)) + (p_bat_eff | float(0)) - (p_grid | float(0)) }}"
+
+      seuil_demarrage: "{{ states('input_number.go_e_surplus_demarrage') | float(1450) }}"
+      seuil_arret: "{{ states('input_number.go_e_surplus_arret') | float(1150) }}"
+
+      soc: "{{ states('sensor.byd_sealion_7_battery_level') | float(0) }}"
+      soc_cible: "{{ states('input_number.go_e_soc_cible') | float(100) }}"
+      soc_atteint: "{{ soc >= soc_cible }}"
+
+      # Mode "Automatique" : fenetre de charge forcee depuis le reseau =
+      # tarif bas actif ET cible SoC pas encore atteinte. En dehors de cette
+      # fenetre, la borne reste en surplus natif (frc=0, psm=0 auto).
+      auto_fenetre: "{{ op_active and not soc_atteint }}"
+
+      en_charge: "{{ states('sensor.go_e_frc') | int(1) == 2 }}"
+
+      # --- Choix des phases en mode Surplus -------------------------------
+      # Triphase de preference ; monophase si surplus < seuil.
+      # Hysteresis de 800 W : on MONTE en triphase a seuil_triphase, on
+      # REDESCEND seulement sous (seuil_triphase - 800).
+      cur_psm: "{{ states('sensor.go_e_psm') | int(-1) }}"
+      seuil_triphase: "{{ states('input_number.go_e_surplus_triphase') | float(4200) }}"
+      en_tri: "{{ cur_psm == 2 }}"
+      phase_tri: "{{ avail >= seuil_triphase or (en_tri and avail >= (seuil_triphase - 800)) }}"
+
+      # Temps minimum entre deux changements de phase (anti-oscillation).
+      # On ne change de phase en mode Surplus que si la derniere bascule
+      # remonte a plus de psm_dwell secondes.
+      psm_dwell: 180
+      psm_age: >
+        {% set s = states.sensor.go_e_psm %}
+        {{ (now() - s.last_changed).total_seconds() if s is not none else 99999 }}
+      psm_switch_ok: "{{ mode != 'Surplus' or (psm_age | float(99999)) > psm_dwell }}"
+
+      # Courant cible : divise par 3 phases si triphase, sinon 1 phase
+      diviseur: "{{ v_ph * (3 if phase_tri else 1) }}"
+      amp_surplus: "{{ [[ (avail / diviseur) | int, 16 ] | min, 6 ] | max }}"
+
+      # --- Plafond de soutirage reseau (protection disjoncteur) -----------
+      # Phases reellement utilisees selon le mode (pour convertir W -> A)
+      phases_actives: >
+        {% if mode == 'Maintenant' %} 3
+        {% elif mode in ['Tarification dynamique', 'Tarification statique'] %} 3
+        {% elif mode == 'Automatique' %} {{ 3 if auto_fenetre else 1 }}
+        {% elif mode == 'Surplus' %} {{ 3 if phase_tri else 1 }}
+        {% else %} 1 {% endif %}
+      div_reseau: "{{ v_ph * (phases_actives | int) }}"
+      max_import: "{{ states('input_select.go_e_puissance_max_reseau') | float(17250) }}"
+      # Puissance que la borne peut consommer sans depasser le plafond =
+      #   conso borne actuelle + marge disponible avant le plafond
+      amp_cap: >
+        {{ [[ ((p_car + (max_import - p_grid)) / div_reseau) | int, 16 ] | min, 0 ] | max }}
+      cap_ok: "{{ (amp_cap | int) >= 6 }}"
+
+      desired_frc: >
+        {% if mode == 'Off' %} 1
+        {% elif not cap_ok %} 1
+        {% elif soc_atteint and mode not in ['Surplus', 'Automatique', 'Maintenant'] %} 1
+        {% elif mode == 'Maintenant' %} 2
+        {% elif mode == 'Automatique' %}
+          {{ 2 if auto_fenetre else 0 }}
+        {% elif mode == 'Surplus' %}
+          {{ 2 if (avail >= seuil_demarrage or (en_charge and avail >= seuil_arret)) else 1 }}
+        {% elif mode == 'Tarification dynamique' %}
+          {{ 2 if hc_active else 1 }}
+        {% elif mode == 'Tarification statique' %}
+          {{ 2 if op_active else 1 }}
+        {% else %} 1
+        {% endif %}
+      desired_amp: >
+        {% if mode == 'Maintenant' %}
+          {% set base = states('input_number.go_e_courant_manuel') | int(10) %}
+          {{ [[ [base, amp_cap | int] | min, 16 ] | min, 6 ] | max }}
+        {% elif mode == 'Surplus' %}
+          {{ [[ [amp_surplus | int, amp_cap | int] | min, 16 ] | min, 6 ] | max }}
+        {% elif mode in ['Tarification dynamique', 'Tarification statique'] %}
+          {{ [[ [16, amp_cap | int] | min, 16 ] | min, 6 ] | max }}
+        {% elif mode == 'Automatique' and auto_fenetre %}
+          {{ [[ [16, amp_cap | int] | min, 16 ] | min, 6 ] | max }}
+        {% else %} {{ states('sensor.go_e_amp') | int(6) }}
+        {% endif %}
+      desired_psm: >
+        {% if mode == 'Surplus' %} {{ 2 if phase_tri else 1 }}
+        {% elif mode == 'Maintenant' %} 2
+        {% elif mode in ['Tarification dynamique', 'Tarification statique'] %} 2
+        {% elif mode == 'Automatique' %} {{ 2 if auto_fenetre else 0 }}
+        {% else %} {{ states('sensor.go_e_psm') | int(1) }}
+        {% endif %}
+
+      cur_frc: "{{ states('sensor.go_e_frc') | int(-1) }}"
+      cur_amp: "{{ states('sensor.go_e_amp') | int(-1) }}"
+
+    condition:
+      # En mode "Surplus natif", c'est la borne qui regule (cle ids) :
+      # cette automatisation ne doit surtout pas interferer (sinon son
+      # else-branch forcerait frc=1 toutes les 15 s).
+      - condition: template
+        value_template: "{{ mode != 'Surplus natif' }}"
+
+    action:
+      - if: "{{ desired_psm | int != cur_psm and psm_switch_ok }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/{{ serial }}/psm/set"
+              payload: "{{ desired_psm | int }}"
+      - if: "{{ desired_amp | int != cur_amp }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/{{ serial }}/amp/set"
+              payload: "{{ desired_amp | int }}"
+      - if: "{{ desired_frc | int != cur_frc }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/{{ serial }}/frc/set"
+              payload: "{{ desired_frc | int }}"
+
+  # ---------------------------------------------------------------------------
+  #  Au demarrage de Home Assistant : forcer le mode "Automatique".
+  #  Le changement de mode declenche l'automatisation principale ci-dessus,
+  #  qui renvoie alors l'etat (frc/amp/psm) a la borne.
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Mode Automatique au demarrage"
+    id: go_e_mode_surplus_demarrage
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      # Laisse le temps au MQTT de se reconnecter et aux capteurs de se peupler
+      - delay: "00:00:20"
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.go_e_mode
+        data:
+          option: "Automatique"
+
+  # ---------------------------------------------------------------------------
+  #  Au demarrage : reconstruire les listes des 4 selecteurs, puis restaurer
+  #  chaque choix depuis sa memoire persistante (input_text.go_e_sel_*).
+  #  Les memoires sont capturees AU TOUT DEBUT, avant toute modification, pour
+  #  ne pas etre ecrasees par la synchro pendant l'execution.
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Listes selecteurs et restauration"
+    id: go_e_listes_selecteurs
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    variables:
+      # Memoires persistantes (valeurs choisies avant le redemarrage)
+      mem_cal: "{{ states('input_text.go_e_sel_calendrier') }}"
+      mem_op: "{{ states('input_text.go_e_sel_offpeak') }}"
+      mem_bat: "{{ states('input_text.go_e_sel_batterie_soc') }}"
+      mem_ess: "{{ states('input_text.go_e_sel_ess_min_soc') }}"
+      mem_bp: "{{ states('input_text.go_e_sel_batterie_puissance') }}"
+    action:
+      # ----- Calendriers (calendar.*) -----
+      - variables:
+          cal_liste: >
+            {{ ['Aucun'] + (states.calendar | map(attribute='entity_id') | list) }}
+      - service: input_select.set_options
+        target:
+          entity_id: input_select.go_e_calendrier_hc
+        data:
+          options: "{{ cal_liste }}"
+      - if: "{{ mem_cal in cal_liste }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.go_e_calendrier_hc
+            data:
+              option: "{{ mem_cal }}"
+
+      # ----- Off-peak (filtre par mots-cles) -----
+      - variables:
+          op_liste: >
+            {% set kw = ['offpeak','off_peak','off peak','creuse','heures_creuses'] %}
+            {% set ns = namespace(items=['Aucun']) %}
+            {% for s in states %}
+              {% set dom = s.entity_id.split('.')[0] %}
+              {% if dom in ['binary_sensor','sensor','switch','input_boolean','schedule'] %}
+                {% set hay = (s.entity_id ~ ' ' ~ (s.name | default(''))) | lower %}
+                {% if kw | select('in', hay) | list | length > 0 %}
+                  {% set ns.items = ns.items + [s.entity_id] %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - service: input_select.set_options
+        target:
+          entity_id: input_select.go_e_offpeak
+        data:
+          options: "{{ op_liste }}"
+      - if: "{{ mem_op in op_liste }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.go_e_offpeak
+            data:
+              option: "{{ mem_op }}"
+
+      # ----- Batterie maison : capteurs SoC (% ou device_class battery) -----
+      - variables:
+          bat_liste: >
+            {% set kw = ['soc','charge','batt','batterie'] %}
+            {% set ns = namespace(items=['Aucun']) %}
+            {% for s in states.sensor %}
+              {% set unit = s.attributes.unit_of_measurement | default('') %}
+              {% set dc = s.attributes.device_class | default('') %}
+              {% set hay = (s.entity_id ~ ' ' ~ (s.name | default(''))) | lower %}
+              {% if unit == '%' and (dc == 'battery'
+                    or kw | select('in', hay) | list | length > 0) %}
+                {% set ns.items = ns.items + [s.entity_id] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - service: input_select.set_options
+        target:
+          entity_id: input_select.go_e_batterie_soc
+        data:
+          options: "{{ bat_liste }}"
+      - if: "{{ mem_bat in bat_liste }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.go_e_batterie_soc
+            data:
+              option: "{{ mem_bat }}"
+
+      # ----- Batterie maison : reglage ESS min SoC (number/input_number) -----
+      - variables:
+          ess_liste: >
+            {% set kw = ['soc','ess','min_soc'] %}
+            {% set ns = namespace(items=['Aucun']) %}
+            {% for s in states %}
+              {% set dom = s.entity_id.split('.')[0] %}
+              {% if dom in ['number','input_number'] %}
+                {% set hay = (s.entity_id ~ ' ' ~ (s.name | default(''))) | lower %}
+                {% if kw | select('in', hay) | list | length > 0 %}
+                  {% set ns.items = ns.items + [s.entity_id] %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - service: input_select.set_options
+        target:
+          entity_id: input_select.go_e_ess_min_soc
+        data:
+          options: "{{ ess_liste }}"
+      - if: "{{ mem_ess in ess_liste }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.go_e_ess_min_soc
+            data:
+              option: "{{ mem_ess }}"
+
+      # ----- Batterie maison : capteurs de PUISSANCE (W/kW) -----
+      - variables:
+          bp_liste: >
+            {% set kw = ['batt','batterie','battery'] %}
+            {% set ns = namespace(items=['Aucun']) %}
+            {% for s in states.sensor %}
+              {% set unit = s.attributes.unit_of_measurement | default('') %}
+              {% set dc = s.attributes.device_class | default('') %}
+              {% set hay = (s.entity_id ~ ' ' ~ (s.name | default(''))) | lower %}
+              {% if unit in ['W','kW','w','kw'] and (dc == 'power'
+                    or kw | select('in', hay) | list | length > 0) %}
+                {% set ns.items = ns.items + [s.entity_id] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+      - service: input_select.set_options
+        target:
+          entity_id: input_select.go_e_batterie_puissance
+        data:
+          options: "{{ bp_liste }}"
+      - if: "{{ mem_bp in bp_liste }}"
+        then:
+          - service: input_select.select_option
+            target:
+              entity_id: input_select.go_e_batterie_puissance
+            data:
+              option: "{{ mem_bp }}"
+
+  # ---------------------------------------------------------------------------
+  #  Memoriser chaque selection dans son input_text (persistant).
+  #  Se declenche quand l'utilisateur change un menu sur le dashboard.
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Memoriser selections"
+    id: go_e_memoriser_selections
+    mode: queued
+    trigger:
+      - platform: state
+        entity_id:
+          - input_select.go_e_calendrier_hc
+          - input_select.go_e_offpeak
+          - input_select.go_e_batterie_soc
+          - input_select.go_e_ess_min_soc
+          - input_select.go_e_batterie_puissance
+    action:
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.go_e_sel_calendrier
+        data:
+          value: "{{ states('input_select.go_e_calendrier_hc') }}"
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.go_e_sel_offpeak
+        data:
+          value: "{{ states('input_select.go_e_offpeak') }}"
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.go_e_sel_batterie_soc
+        data:
+          value: "{{ states('input_select.go_e_batterie_soc') }}"
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.go_e_sel_ess_min_soc
+        data:
+          value: "{{ states('input_select.go_e_ess_min_soc') }}"
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.go_e_sel_batterie_puissance
+        data:
+          value: "{{ states('input_select.go_e_batterie_puissance') }}"
+
+  # ---------------------------------------------------------------------------
+  #  BLOCAGE DECHARGE BATTERIE MAISON pendant la charge du vehicule.
+  #  Independant du mode de la borne.
+  #  Pendant la charge : ESS min SoC = SoC actuel de la batterie.
+  #  Hors charge       : ESS min SoC ramene a la valeur de repos.
+  #  N'ecrit que si la valeur change (menage l'onduleur).
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Blocage decharge batterie maison"
+    id: go_e_blocage_decharge_batterie
+    mode: single
+    trigger:
+      - platform: time_pattern
+        seconds: "/30"
+      - platform: state
+        entity_id: sensor.go_e_car
+      # Suit le SoC batterie qui evolue (entite choisie dynamiquement)
+      - platform: template
+        value_template: "{{ states(states('input_select.go_e_batterie_soc')) }}"
+    variables:
+      soc_ent: "{{ states('input_select.go_e_batterie_soc') }}"
+      ess_ent: "{{ states('input_select.go_e_ess_min_soc') }}"
+      invalides: "{{ ['Aucun','unknown','unavailable',''] }}"
+      config_ok: "{{ soc_ent not in invalides and ess_ent not in invalides }}"
+
+      # Charge en cours : voiture en charge (car==2) ou puissance > 1000 W
+      charge_active: >
+        {{ states('sensor.go_e_car') | int(0) == 2
+           or states('sensor.go_echarger_258457_power_total') | float(0) > 1000 }}
+
+      soc_bat: "{{ states(soc_ent) | float(-1) if config_ok else -1 }}"
+      repos: "{{ states('input_number.go_e_ess_repos') | float(20) }}"
+
+      ess_actuel: "{{ states(ess_ent) | float(-1) if config_ok else -1 }}"
+      # Cible : SoC actuel de la batterie pendant la charge, repos sinon.
+      # (arrondi a l'entier le plus proche pour coller au pas du reglage)
+      cible: >
+        {{ (soc_bat | round(0)) if charge_active else (repos | float) }}
+    condition:
+      - condition: template
+        value_template: "{{ config_ok and soc_bat >= 0 }}"
+      # Hors charge, on ne fait que RELACHER (redescendre) : on n'ecrit que si
+      # la valeur actuelle est au-dessus du repos. Pendant la charge, on ecrit
+      # des que la cible differe de la valeur actuelle.
+      - condition: template
+        value_template: >
+          {% if charge_active %}
+            {{ (cible | int) != (ess_actuel | int) }}
+          {% else %}
+            {{ (ess_actuel | float) > (repos | float) }}
+          {% endif %}
+    action:
+      - choose:
+          - conditions: "{{ ess_ent.startswith('number.') }}"
+            sequence:
+              - service: number.set_value
+                target:
+                  entity_id: "{{ ess_ent }}"
+                data:
+                  value: "{{ cible | int }}"
+          - conditions: "{{ ess_ent.startswith('input_number.') }}"
+            sequence:
+              - service: input_number.set_value
+                target:
+                  entity_id: "{{ ess_ent }}"
+                data:
+                  value: "{{ cible | int }}"
+
+  # ---------------------------------------------------------------------------
+  #  MODE "SURPLUS NATIF" (simulation go-e Controller via la cle ids)
+  #
+  #  A) Activation   : borne en mode Eco + surplus PV + phases auto, puis on
+  #                     lui laisse la main. La regulation HA (automatisation
+  #                     principale) est neutralisee par sa condition de mode.
+  #  B) Heartbeat    : envoi de pGrid toutes les 5 s. Si la borne ne recoit
+  #                     rien pendant ~10 s elle desactive sa logique PV
+  #                     -> comportement sur par defaut en cas de panne HA/P1.
+  #  C) Desactivation: retour en mode logique Default ; la regulation HA du
+  #                     nouveau mode choisi reprend le controle (frc/amp/psm).
+  #
+  #  Notes :
+  #  - Pas de coupure SoC vehicule dans ce mode (meme comportement que le
+  #    mode "Surplus" HA).
+  #  - MODE "AUTOMATIQUE" : les automatisations natives ci-dessous (activation,
+  #    watchdog, heartbeat pGrid) tournent aussi dans ce mode. La difference :
+  #    pendant le tarif bas ET tant que la cible SoC n'est pas atteinte,
+  #    l'automatisation principale force la charge reseau (frc=2, tri, 16 A,
+  #    plafond respecte). Des que la cible est atteinte ou la fenetre finie,
+  #    elle rend un etat neutre (frc=0, psm=0) et la logique surplus native
+  #    de la borne reprend -> la charge continue au-dela de la cible avec le
+  #    solaire uniquement.
+  #  - Le blocage decharge batterie maison (ESS min SoC) reste actif : il est
+  #    independant du mode. C'est lui qui protege physiquement la batterie.
+  #  - Le plafond de soutirage n'est pas applique ici : en surplus la borne
+  #    vise ~0 W d'import, le risque est donc marginal. Regler dans l'app
+  #    go-e la "valeur cible reseau" (pgt) a environ -200 W.
+  #  - Au redemarrage de HA le mode par defaut est "Automatique".
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Surplus natif - activation"
+    id: go_e_surplus_natif_activation
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_select.go_e_mode
+        to:
+          - "Surplus natif"
+          - "Automatique"
+      # Re-applique les reglages si le curseur triphase change en cours de mode
+      - platform: state
+        entity_id: input_number.go_e_surplus_triphase
+    condition:
+      - condition: template
+        value_template: >-
+          {{ states('input_select.go_e_mode') in ['Surplus natif', 'Automatique'] }}
+    action:
+      # Mode logique Eco (3=Default, 4=Eco, 5=Next Trip)
+      - service: mqtt.publish
+        data:
+          topic: "go-eCharger/258457/lmo/set"
+          payload: "4"
+      # Active la fonction surplus PV de la borne
+      - service: mqtt.publish
+        data:
+          topic: "go-eCharger/258457/fup/set"
+          payload: "true"
+      # Commutation de phases geree par la borne (0 = auto)
+      - service: mqtt.publish
+        data:
+          topic: "go-eCharger/258457/psm/set"
+          payload: "0"
+      # Seuil de bascule mono->tri de la logique native (spl3, en W),
+      # aligne sur le curseur "Surplus - bascule triphase" du dashboard.
+      # Sans lui, un spl3 d'usine trop haut bloque la charge a ~3,7 kW (16 A mono).
+      - service: mqtt.publish
+        data:
+          topic: "go-eCharger/258457/spl3/set"
+          payload: "{{ states('input_number.go_e_surplus_triphase') | int(4200) }}"
+      # Etat de force neutre : la borne decide seule de charger ou non
+      - service: mqtt.publish
+        data:
+          topic: "go-eCharger/258457/frc/set"
+          payload: "0"
+
+  # Watchdog : une mise a jour firmware ou un redemarrage de la borne peut
+  # reinitialiser lmo/fup/psm/spl3 SANS que le mode HA ne change (donc sans
+  # re-declencher l'activation). Toutes les minutes en mode natif, on verifie
+  # les valeurs relues via MQTT et on ne reecrit QUE ce qui a derive.
+  - alias: "Go-e - Surplus natif - watchdog reglages"
+    id: go_e_surplus_natif_watchdog
+    mode: single
+    max_exceeded: silent
+    trigger:
+      - platform: time_pattern
+        minutes: "/1"
+    condition:
+      - condition: template
+        value_template: >-
+          {{ states('input_select.go_e_mode') in ['Surplus natif', 'Automatique'] }}
+    variables:
+      spl3_cible: "{{ states('input_number.go_e_surplus_triphase') | int(4200) }}"
+      # Fenetre de charge forcee du mode Automatique (tarif bas + cible non
+      # atteinte) : pendant celle-ci, l'automatisation principale impose
+      # psm=2 -> le watchdog ne doit PAS remettre psm=0.
+      ent_op: "{{ states('input_select.go_e_offpeak') }}"
+      fenetre_forcee: >-
+        {{ states('input_select.go_e_mode') == 'Automatique'
+           and ent_op not in ['Aucun','unknown','unavailable','']
+           and states(ent_op) | lower in ['on','true','offpeak','active','yes','1']
+           and (states('sensor.byd_sealion_7_battery_level') | float(0))
+               < (states('input_number.go_e_soc_cible') | float(100)) }}
+    action:
+      - if: "{{ states('sensor.go_e_lmo') | int(-1) != 4 }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/258457/lmo/set"
+              payload: "4"
+      - if: "{{ states('sensor.go_e_fup') | lower != 'true' }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/258457/fup/set"
+              payload: "true"
+      - if: "{{ states('sensor.go_e_psm') | int(-1) != 0 and not fenetre_forcee }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/258457/psm/set"
+              payload: "0"
+      - if: "{{ (states('sensor.go_e_spl3') | float(-1) | round(0)) != spl3_cible }}"
+        then:
+          - service: mqtt.publish
+            data:
+              topic: "go-eCharger/258457/spl3/set"
+              payload: "{{ spl3_cible }}"
+
+  - alias: "Go-e - Surplus natif - envoi pGrid"
+    id: go_e_surplus_natif_heartbeat
+    mode: single
+    max_exceeded: silent
+    trigger:
+      - platform: time_pattern
+        seconds: "/5"
+    variables:
+      # pGrid envoye = P1 corrige de la batterie maison, avec exactement la
+      # meme logique signe/priorite que le calcul de surplus du mode HA :
+      #  - priorite "Batterie" : la decharge batterie est ajoutee au soutirage
+      #    (elle n'est pas comptee comme surplus) ; la charge batterie reste
+      #    prioritaire (la borne ne voit pas ce solaire).
+      #  - priorite "Voiture"  : la puissance qui charge la batterie apparait
+      #    comme de l'injection -> la borne la recupere pour la voiture.
+      p_grid: "{{ states('sensor.p1_meter_power') | float(0) }}"
+      bp_ent: "{{ states('input_select.go_e_batterie_puissance') }}"
+      bp_valid: "{{ bp_ent not in ['Aucun','unknown','unavailable',''] }}"
+      bp_raw: "{{ states(bp_ent) | float(0) if bp_valid else 0 }}"
+      bp_unit: "{{ state_attr(bp_ent,'unit_of_measurement') | default('W') if bp_valid else 'W' }}"
+      bp_w: "{{ (bp_raw | float(0)) * (1000 if bp_unit in ['kW','kw'] else 1) }}"
+      p_bat: >
+        {{ (bp_w | float(0)) if states('input_select.go_e_batterie_signe') == 'Charge positive'
+           else (-1 * (bp_w | float(0))) }}
+      p_bat_eff: >
+        {{ (p_bat | float(0)) if states('input_select.go_e_surplus_priorite') == 'Voiture'
+           else [ p_bat | float(0), 0 ] | min }}
+      pgrid_envoi: "{{ ((p_grid | float(0)) - (p_bat_eff | float(0))) | round(0) }}"
+    condition:
+      - condition: template
+        value_template: >-
+          {{ states('input_select.go_e_mode') in ['Surplus natif', 'Automatique'] }}
+      # Securite : ne rien envoyer si le P1 est indisponible. Sans donnees
+      # fraiches, la borne stoppe d'elle-meme le surplus (~10 s).
+      - condition: template
+        value_template: >
+          {{ states('sensor.p1_meter_power') not in ['unknown','unavailable'] }}
+    action:
+      - service: rest_command.go_e_send_ids
+        data:
+          pgrid: "{{ pgrid_envoi }}"
+
+  - alias: "Go-e - Surplus natif - desactivation"
+    id: go_e_surplus_natif_desactivation
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_select.go_e_mode
+        from:
+          - "Surplus natif"
+          - "Automatique"
+    condition:
+      # Ne rien faire lors d'un simple passage natif <-> Automatique :
+      # les deux modes utilisent la logique Eco de la borne.
+      - condition: template
+        value_template: >-
+          {{ trigger.to_state.state not in ['Surplus natif', 'Automatique'] }}
+    action:
+      # Retour au mode logique Default. Le reste (frc/amp/psm) est repris
+      # immediatement par l'automatisation principale, declenchee par le
+      # meme changement de mode.
+      - service: mqtt.publish
+        data:
+          topic: "go-eCharger/258457/lmo/set"
+          payload: "3"
+
+  # ---------------------------------------------------------------------------
+  #  RAFRAICHISSEMENT SoC VEHICULE (BYD Sealion 7)
+  #  Le polling continu de l'integration reste DESACTIVE en permanence
+  #  (switch "Disable polling" sur ON) pour laisser la voiture dormir.
+  #  A la place, on presse "Force poll" de maniere ciblee :
+  #    - au branchement du cable (SoC de depart frais),
+  #    - toutes les 5 min UNIQUEMENT pendant la charge (car = 2), seul moment
+  #      ou le SoC evolue -> coupure precise (~1% a 11 kW) dans les modes
+  #      Tarification statique / dynamique,
+  #    - jamais en dehors : voiture en veille, meme cable branche.
+  #  Au debranchement (confirme 2 min), on s'assure que le polling continu
+  #  reste bien coupe (filet de securite si le switch a ete touche a la main).
+  #
+  #  PREREQUIS : mettre une fois le switch "Disable polling" sur ON, et
+  #  verifier que le bouton "Force poll" rafraichit bien le SoC meme quand
+  #  le polling est desactive (le presser a la main et observer le capteur).
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Rafraichissement SoC vehicule"
+    id: go_e_soc_refresh
+    mode: single
+    max_exceeded: silent
+    trigger:
+      # Cable branche : car passe au-dessus de 1 (2=charge, 3=pret, 4=termine)
+      - platform: numeric_state
+        entity_id: sensor.go_e_car
+        above: 1
+        id: branche
+      # Cadence reguliere ; ajuster "/5" pour changer l'intervalle
+      - platform: time_pattern
+        minutes: "/5"
+        id: periodique
+      # Cable debranche, confirme 2 minutes
+      - platform: state
+        entity_id: sensor.go_e_car
+        to: "1"
+        for: "00:02:00"
+        id: debranche
+    action:
+      - choose:
+          # Branchement : lecture immediate du SoC de depart
+          - conditions: "{{ trigger.id == 'branche' }}"
+            sequence:
+              - service: button.press
+                target:
+                  entity_id: button.byd_sealion_7_force_poll
+          # Suivi regulier, seulement pendant la charge active
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.id == 'periodique' }}"
+              - condition: state
+                entity_id: sensor.go_e_car
+                state: "2"
+            sequence:
+              - service: button.press
+                target:
+                  entity_id: button.byd_sealion_7_force_poll
+          # Debranchement : garantir que le polling continu reste coupe
+          - conditions: "{{ trigger.id == 'debranche' }}"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.byd_sealion_7_disable_polling
+
+
+  # ---------------------------------------------------------------------------
+  #  REVEIL VEHICULE ENDORMI (BYD Sealion 7)
+  #  Symptome observe : apres une pause de charge, la voiture clot sa session
+  #  (car=4 "termine") et s'endort. La borne offre a nouveau du courant
+  #  (alw=true, modelStatus=12) mais la voiture l'ignore. Un "Force poll" via
+  #  le cloud BYD reveille la telematique -> la voiture revoit l'offre sur le
+  #  cable pilote et reprend la charge.
+  #
+  #  Declenchement : la borne autorise (alw) mais la voiture reste en
+  #  "termine" (car=4) pendant 3 minutes, dans un mode ou la charge est
+  #  attendue. Garde-fou : au plus une tentative par 15 minutes (throttle via
+  #  le champ "for" + mode single, et condition sur la derniere execution).
+  # ---------------------------------------------------------------------------
+  - alias: "Go-e - Reveil vehicule endormi"
+    id: go_e_reveil_vehicule
+    mode: single
+    max_exceeded: silent
+    trigger:
+      # La situation "borne offre / voiture sourde" persiste 3 minutes
+      - platform: state
+        entity_id: sensor.go_e_car
+        to: "4"
+        for: "00:03:00"
+      # Re-verification periodique tant que la situation dure
+      - platform: time_pattern
+        minutes: "/5"
+    condition:
+      # La borne offre du courant...
+      - condition: state
+        entity_id: sensor.go_e_alw
+        state: "true"
+      # ...mais la voiture reste sur "session terminee"
+      - condition: state
+        entity_id: sensor.go_e_car
+        state: "4"
+        for: "00:03:00"
+      # Uniquement dans les modes ou une charge est attendue
+      - condition: template
+        value_template: >-
+          {{ states('input_select.go_e_mode')
+             in ['Maintenant', 'Surplus', 'Surplus natif', 'Automatique',
+                 'Tarification dynamique', 'Tarification statique'] }}
+      # Mode "Maintenant" : la coupure SoC est ignoree (la charge continue
+      # jusqu'a l'arret de la voiture elle-meme). Une fois la cible atteinte,
+      # un car=4 est donc l'arret normal de la voiture : pas de reveil cloud.
+      - condition: template
+        value_template: >-
+          {{ not (states('input_select.go_e_mode') == 'Maintenant'
+                  and states('sensor.byd_sealion_7_battery_level') | float(0)
+                      >= states('input_number.go_e_soc_cible') | float(100)) }}
+      # Throttle : pas plus d'une tentative par 15 minutes
+      - condition: template
+        value_template: >-
+          {% set last = this.attributes.last_triggered %}
+          {{ last is none or (now() - last).total_seconds() > 900 }}
+    action:
+      - service: button.press
+        target:
+          entity_id: button.byd_sealion_7_force_poll
+
+# ----- 5) TELEMETRIE D'ANALYSE ------------------------------------------------
+#  Compteurs d'energie derives de la repartition solaire/reseau ci-dessus.
+#  Ce sont les metriques de succes du systeme : combien de kWh de charge
+#  proviennent du soleil vs du reseau, par semaine.
+sensor:
+  - platform: integration
+    source: sensor.go_e_puissance_charge_solaire
+    name: "Go-e energie charge solaire"
+    unique_id: go_e_energie_charge_solaire
+    unit_prefix: k
+    round: 2
+    method: left
+
+  - platform: integration
+    source: sensor.go_e_puissance_charge_reseau
+    name: "Go-e energie charge reseau"
+    unique_id: go_e_energie_charge_reseau
+    unit_prefix: k
+    round: 2
+    method: left
+
+utility_meter:
+  go_e_solaire_semaine:
+    name: "Go-e charge solaire (semaine)"
+    source: sensor.go_e_energie_charge_solaire
+    cycle: weekly
+
+  go_e_reseau_semaine:
+    name: "Go-e charge reseau (semaine)"
+    source: sensor.go_e_energie_charge_reseau
+    cycle: weekly
