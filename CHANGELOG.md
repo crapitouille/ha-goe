@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Non publié]
+- Dashboard « Go-e Mobilité » (vues Mobilité et Configurations) dans `dashboards/`.
 - Mode **Maintenant** : la coupure sur la cible SoC est ignorée (la charge
   continue jusqu'à l'arrêt de la voiture). « Off » et le plafond de puissance
   réseau restent prioritaires.

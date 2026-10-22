@@ -46,6 +46,7 @@ instance enregistrée sur ce service (une fois pour toutes).
 |---|---|
 | Ajouter l'intégration MQTT (si absente) | [![Ouvrir MQTT](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=mqtt) |
 | Vérifier la configuration, recharger le YAML | [![Contrôles du serveur](https://my.home-assistant.io/badges/server_controls.svg)](https://my.home-assistant.io/redirect/server_controls/) |
+| Ouvrir vos tableaux de bord (pour ajouter le dashboard) | [![Tableaux de bord](https://my.home-assistant.io/badges/lovelace_dashboards.svg)](https://my.home-assistant.io/redirect/lovelace_dashboards/) |
 | Contrôler les entités créées (`go_e_*`) | [![États](https://my.home-assistant.io/badges/developer_states.svg)](https://my.home-assistant.io/redirect/developer_states/) |
 
 ## Installation
@@ -77,9 +78,25 @@ instance enregistrée sur ce service (une fois pour toutes).
 
 Un rechercher/remplacer global suffit pour la série et l'IP.
 
+### Dashboard « Go-e Mobilité » (optionnel)
+
+`dashboards/go_e_mobilite.yaml` reprend deux vues :
+- **Mobilité** : mode, statut, phases, SoC voiture, jauges borne / PV / surplus, historiques.
+- **Configurations** : tous les réglages (courant manuel, seuils de surplus, plafond réseau, calendrier,
+  capteur off-peak, batterie maison, cible SoC).
+
+Installation (après le package, pour que les entités `go_e_*` existent) :
+1. Bouton *Tableaux de bord* ci-dessus → **Ajouter un tableau de bord** → *Nouveau tableau de bord depuis zéro*.
+2. L'ouvrir, puis menu ⋮ → **Modifier** → menu ⋮ → **Éditeur de configuration brut**.
+3. Remplacer tout le contenu par celui de `dashboards/go_e_mobilite.yaml`, puis enregistrer.
+
+Adapter les entités extérieures au package (`sensor.go_echarger_258457_*`, `sensor.solaredge_i126_dc_power`,
+`sensor.p1_meter_power`, `sensor.byd_sealion_7_battery_level`). Les images de fond et restrictions
+d'utilisateurs de l'instance d'origine ont été retirées.
+
 ## Tests de régression
 
-Les tests évaluent les **vrais templates Jinja** du package avec des fonctions Home Assistant simulées
+Les tests évaluent les **vrais templates Jinja** du package (et vérifient que le dashboard ne référence que des entités définies) avec des fonctions Home Assistant simulées
 et comparent l'ancien et le nouveau comportement sur plusieurs milliers de scénarios.
 
 ```bash

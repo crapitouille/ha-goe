@@ -17,8 +17,10 @@ Contenu :
                    plafond restent prioritaires).
   4. Autres modes: non-regression exhaustive (frc/amp/psm identiques).
   5. Reveil BYD  : table de verite de la nouvelle condition.
+  6. Dashboard   : YAML valide, vues attendues, entites go_e_* presentes dans le package.
 """
 import itertools
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -332,6 +334,22 @@ for last, exp in [(None, True), (NOW - timedelta(seconds=1000), True),
 
 # Les 4 conditions d'origine + la nouvelle sont presentes
 check(len(rev["condition"]) == 5, f"5 conditions attendues dans le reveil, {len(rev['condition'])}")
+
+# --------------------------------------------------------------------------
+# 6) DASHBOARD : YAML valide, vues attendues, entites go_e_* definies
+# --------------------------------------------------------------------------
+DASH = Path(PATH).resolve().parent.parent / "dashboards" / "go_e_mobilite.yaml"
+if DASH.exists():
+    dash_raw = DASH.read_text(encoding="utf-8")
+    dash = yaml.load(dash_raw, Loader=L)
+    check([v.get("path") for v in dash["views"]] == ["mobilite", "configurations"],
+          "vues du dashboard inattendues")
+    check("media-source://" not in dash_raw, "image de fond propre a l'instance dans le dashboard")
+    dash_ents = set(re.findall(r"\b(?:sensor|input_select|input_number)\.(go_e_[a-z0-9_]+)", dash_raw))
+    check(len(dash_ents) >= 20, f"trop peu d'entites go_e_* dans le dashboard ({len(dash_ents)})")
+    for slug in sorted(dash_ents):
+        check(slug in RAW, f"entite du dashboard absente du package : {slug}")
+    print(f"Dashboard      : {len(dash_ents)} entites go_e_* verifiees dans le package")
 
 # --------------------------------------------------------------------------
 print(f"Structure      : {n_tpl} templates compiles, {len(autos)} automatisations")

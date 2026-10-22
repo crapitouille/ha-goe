@@ -1,0 +1,158 @@
+# =============================================================================
+#  Dashboard "Go-e Mobilite" : vues "Mobilite" et "Configurations"
+#  (extraites du dashboard "Smart Home" ; sans image de fond ni restriction
+#   d'utilisateurs, qui sont propres a l'instance d'origine)
+#
+#  Installation : Parametres > Tableaux de bord > Ajouter un tableau de bord,
+#  l'ouvrir, menu (3 points) > Modifier > menu > Editeur de configuration brut,
+#  puis coller tout ce fichier. Voir le README.
+#  A adapter : sensor.go_echarger_258457_* (serie de la borne),
+#  sensor.solaredge_i126_dc_power (PV), sensor.p1_meter_power (reseau),
+#  sensor.byd_sealion_7_battery_level (voiture).
+# =============================================================================
+title: Go-e Mobilité
+views:
+- type: sections
+  max_columns: 4
+  title: Mobilité
+  path: mobilite
+  icon: mdi:car
+  show_icon_and_title: true
+  sections:
+  - type: grid
+    cards:
+    - type: entities
+      title: Mode de recharge
+      show_header_toggle: false
+      entities:
+      - entity: input_select.go_e_mode
+        name: Mode
+      - entity: sensor.go_e_statut
+        name: Statut
+      - entity: sensor.go_e_phases
+        name: Phases
+      - entity: sensor.byd_sealion_7_battery_level
+        name: Batterie vehicule
+    - type: horizontal-stack
+      cards:
+      - type: gauge
+        name: Charge borne
+        entity: sensor.go_echarger_258457_power_total
+        unit: W
+        min: 0
+        max: 11000
+        needle: true
+        severity:
+          green: 1
+          yellow: 3700
+          red: 9000
+      - type: gauge
+        name: Production PV
+        entity: sensor.solaredge_i126_dc_power
+        unit: W
+        min: 0
+        max: 11000
+        needle: true
+        severity:
+          red: 0
+          yellow: 1000
+          green: 3000
+      - type: gauge
+        name: Surplus
+        entity: sensor.go_e_surplus_estime
+        unit: W
+        min: -3000
+        max: 11000
+        needle: true
+        severity:
+          red: -3000
+          yellow: 0
+          green: 1450
+    - type: glance
+      title: Energie en direct
+      columns: 4
+      entities:
+      - entity: sensor.p1_meter_power
+        name: Reseau
+      - entity: sensor.solaredge_i126_dc_power
+        name: PV (DC)
+      - entity: sensor.go_echarger_258457_power_total
+        name: Borne
+      - entity: sensor.go_e_surplus_estime
+        name: Surplus
+    - type: history-graph
+      title: Historique puissances (24 h)
+      hours_to_show: 24
+      entities:
+      - entity: sensor.go_echarger_258457_power_total
+        name: Charge borne
+      - entity: sensor.solaredge_i126_dc_power
+        name: Production PV
+      - entity: sensor.p1_meter_power
+        name: Reseau
+      - entity: sensor.go_e_surplus_estime
+        name: Surplus estime
+    - type: history-graph
+      title: Mode, courant et batterie
+      hours_to_show: 24
+      entities:
+      - entity: input_select.go_e_mode
+        name: Mode
+      - entity: sensor.go_e_amp
+        name: Courant
+      - entity: sensor.byd_sealion_7_battery_level
+        name: Batterie
+    - type: entities
+      title: Detail (brut)
+      entities:
+      - entity: sensor.go_e_frc
+        name: frc (1=Off 2=On)
+      - entity: sensor.go_e_amp
+        name: amp (A)
+      - entity: sensor.go_e_psm
+        name: psm (1=mono 2=tri)
+      - entity: sensor.go_e_car
+        name: car (1..4)
+- type: sections
+  path: configurations
+  max_columns: 4
+  title: Configurations
+  icon: mdi:content-save-settings
+  show_icon_and_title: true
+  sections:
+  - type: grid
+    cards:
+    - type: heading
+      heading: Configuration Mobilité
+      heading_style: title
+    - type: entities
+      title: Reglages
+      entities:
+      - entity: input_number.go_e_courant_manuel
+        name: Courant manuel
+      - entity: input_number.go_e_surplus_demarrage
+        name: Surplus - demarrage
+      - entity: input_number.go_e_surplus_arret
+        name: Surplus - arret
+      - entity: input_number.go_e_surplus_triphase
+        name: Surplus - bascule triphase
+      - entity: input_select.go_e_puissance_max_reseau
+        name: Puissance max raccordement
+      - entity: input_select.go_e_calendrier_hc
+        name: Calendrier (tarif dynamique)
+      - entity: input_select.go_e_offpeak
+        name: Capteur off-peak (tarif statique)
+      - entity: input_select.go_e_batterie_soc
+        name: Batterie maison - capteur SoC
+      - entity: input_select.go_e_ess_min_soc
+        name: Batterie maison - reglage ESS min SoC
+      - entity: input_select.go_e_batterie_puissance
+        name: Batterie maison - capteur puissance
+      - entity: input_select.go_e_batterie_signe
+        name: Batterie maison - sens du signe
+      - entity: input_select.go_e_surplus_priorite
+        name: Surplus - priorite
+      - entity: input_number.go_e_ess_repos
+        name: Batterie maison - ESS min SoC repos
+      - entity: input_number.go_e_soc_cible
+        name: Niveau de charge cible
